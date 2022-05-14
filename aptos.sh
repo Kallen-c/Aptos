@@ -10,72 +10,104 @@ else
 fi
 curl -s curl -s https://raw.githubusercontent.com/Kallen-c/utils/main/logo.sh | bash && sleep 2
 
-sudo apt update && sudo apt install git -y
-cd $HOME
-rm -rf aptos-core
-sudo mkdir -p /opt/aptos/etc/ /opt/aptos/data .aptos/config .aptos/key
-git clone https://github.com/aptos-labs/aptos-core.git
-cd aptos-core
-git checkout origin/devnet &>/dev/null
-echo y | ./scripts/dev_setup.sh
-source ~/.cargo/env
-cargo build -p aptos-node --release
-cargo build -p aptos-operational-tool --release
-mv  ~/aptos-core/target/release/aptos-node /usr/local/bin
-mv  ~/aptos-core/target/release/aptos-operational-tool /usr/local/bin
-#/usr/local/bin/aptos-operational-tool generate-key --encoding hex --key-type x25519 --key-file ~/.aptos/key/private-key.txt
-if [ -f ~/.aptos/key/private-key.txt ]; then
-    echo ""
-else 
-    /usr/local/bin/aptos-operational-tool generate-key --encoding hex --key-type x25519 --key-file ~/.aptos/key/private-key.txt
+# set vars
+echo "export WORKSPACE=testnet" >> $HOME/.bash_profile
+echo "export PUBLIC_IP=$(curl -s ifconfig.me)" >> $HOME/.bash_profile
+source $HOME/.bash_profile
+
+echo -e "\e[1m\e[32m1. Updating dependencies... \e[0m" && sleep 1
+sudo apt update && sudo apt upgrade -y
+
+echo -e "\e[1m\e[32m2. Installing required dependencies... \e[0m" && sleep 1
+sudo apt-get install jq unzip -y
+sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.23.1/yq_linux_amd64 && chmod +x /usr/local/bin/yq
+
+echo -e "\e[1m\e[32m3. Checking if Docker is installed... \e[0m" && sleep 1
+if ! command -v docker &> /dev/null
+then
+    echo -e "\e[1m\e[32m3.1 Installing Docker... \e[0m" && sleep 1
+    sudo apt-get install ca-certificates curl gnupg lsb-release -y
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    sudo apt-get update
+    sudo apt-get install docker-ce docker-ce-cli containerd.io -y
 fi
 
-if [ -f ~/.aptos/config/peer-info.yaml ]; then
-    echo ""
-else 
-    /usr/local/bin/aptos-operational-tool extract-peer-from-file --encoding hex --key-file ~/.aptos/key/private-key.txt --output-file ~/.aptos/config/peer-info.yaml &>/dev/null
+echo -e "\e[1m\e[32m4. Checking if Docker Compose is installed ... \e[0m" && sleep 1
+docker compose version
+if [ $? -ne 0 ]
+then
+    echo -e "\e[1m\e[32m4.1 Installing Docker Compose v2.3.3 ... \e[0m" && sleep 1
+    mkdir -p ~/.docker/cli-plugins/
+    curl -SL https://github.com/docker/compose/releases/download/v2.2.3/docker-compose-linux-x86_64 -o ~/.docker/cli-plugins/docker-compose
+    chmod +x ~/.docker/cli-plugins/docker-compose
+    sudo chown $USER /var/run/docker.sock
 fi
 
-#/usr/local/bin/aptos-operational-tool extract-peer-from-file --encoding hex --key-file ~/.aptos/key/private-key.txt --output-file ~/.aptos/config/peer-info.yaml &>/dev/null
-cp ~/aptos-core/config/src/config/test_data/public_full_node.yaml ~/.aptos/config/
-wget -q -O /opt/aptos/etc/genesis.blob https://devnet.aptoslabs.com/genesis.blob
-wget -q -O /opt/aptos/etc/waypoint.txt https://devnet.aptoslabs.com/waypoint.txt
-PRIVKEY=$(cat ~/.aptos/key/private-key.txt)
-PEER=$(sed -n 2p ~/.aptos/config/peer-info.yaml | sed 's/.$//')
-sed -i "s/genesis_file_location: .*/genesis_file_location: \"\/opt\/aptos\/etc\/genesis.blob\"/" $HOME/.aptos/config/public_full_node.yaml
-sed -i "s/from_file: .*/from_file: \"\/opt\/aptos\/etc\/waypoint.txt\"/" $HOME/.aptos/config/public_full_node.yaml
-sleep 2 
-sed -i.bak -e "s/127.0.0.1/0.0.0.0/" $HOME/.aptos/config/public_full_node.yaml
-sed -i '/listen_address: \"*\"/a\
-      identity:\
-        type: "from_config"\
-        key: "'$PRIVKEY'"\
-        peer_id: "'$PEER'"' $HOME/.aptos/config/public_full_node.yaml
+# download aptos-cli
+wget -qO aptos-cli.zip https://github.com/aptos-labs/aptos-core/releases/download/aptos-cli-v0.1.1/aptos-cli-0.1.1-Ubuntu-x86_64.zip
+unzip aptos-cli.zip -d /usr/local/bin
+chmod +x /usr/local/bin/aptos
+rm aptos-cli.zip
 
+echo -e "\e[1m\e[32m5. Installing Validator Node ... \e[0m" && sleep 1
+mkdir ~/$WORKSPACE && cd ~/$WORKSPACE
 
-echo "[Unit]
-Description=Aptos
-After=network.target
+# download configs
+wget -qO docker-compose.yaml https://raw.githubusercontent.com/aptos-labs/aptos-core/main/docker/compose/aptos-node/docker-compose.yaml
+wget -qO validator.yaml https://raw.githubusercontent.com/aptos-labs/aptos-core/main/docker/compose/aptos-node/validator.yaml
+wget -qO fullnode.yaml https://raw.githubusercontent.com/aptos-labs/aptos-core/main/docker/compose/aptos-node/fullnode.yaml
 
-[Service]
-User=$USER
-Type=simple
-ExecStart=/usr/local/bin/aptos-node -f $HOME/.aptos/config/public_full_node.yaml
-Restart=on-failure
-LimitNOFILE=65535
+# generate keys
+aptos genesis generate-keys --output-dir ~/$WORKSPACE
 
-[Install]
-WantedBy=multi-user.target" > $HOME/aptosd.service
-mv $HOME/aptosd.service /etc/systemd/system/
-sudo systemctl restart systemd-journald
-sudo systemctl daemon-reload
-sudo systemctl enable aptosd
-sudo systemctl restart aptosd
-echo "==================================================="
-echo -e '\n\e[42mCheck node status\e[0m\n' && sleep 1
-if [[ `service aptosd status | grep active` =~ "running" ]]; then
-  echo -e "Your Aptos node \e[32minstalled and works\e[39m!"
-  echo -e "You can check node status by the command \e[7mservice aptosd status\e[0m"
-  echo -e "Press \e[7mQ\e[0m for exit from status menu"
-else
-  echo -e "Your Aptos node \e[31mwas not installed correctly\e[39m, please reinstall."
+# configure validator
+aptos genesis set-validator-configuration \
+  --keys-dir ~/$WORKSPACE --local-repository-dir ~/$WORKSPACE \
+  --username aptosbot \
+  --validator-host $PUBLIC_IP:6180 \
+  --full-node-host $PUBLIC_IP:6182
+  
+# generate root key
+mkdir keys
+aptos key generate --output-file keys/root
+
+# add layout file
+tee layout.yaml > /dev/null <<EOF
+---
+root_key: "0x5243ca72b0766d9e9cbf2debf6153443b01a1e0e6d086c7ea206eaf6f8043956"
+users:
+  - aptosbot
+chain_id: 23
+EOF
+
+# download aptos framework
+wget -qO framework.zip https://github.com/aptos-labs/aptos-core/releases/download/aptos-framework-v0.1.0/framework.zip
+unzip framework.zip
+rm framework.zip
+
+# compile genesis blob and waypoint
+aptos genesis generate-genesis --local-repository-dir ~/$WORKSPACE --output-dir ~/$WORKSPACE
+
+# run docker compose
+docker compose up -d
+
+echo "=================================================="
+echo -e "\e[1m\e[32mAptos Validator Node Started \e[0m"
+echo -e "Please backup key files \e[1m\e[32mprivate-keys.yaml, validator-identity.yaml, validator-full-node-identity.yaml \e[0mlocated in: \e[1m\e[32m~/$WORKSPACE\e[0m"
+echo "=================================================="
+
+echo -e "\e[1m\e[32mVerify initial synchronization: \e[0m" 
+echo -e "\e[1m\e[39m    curl 127.0.0.1:9101/metrics 2> /dev/null | grep aptos_state_sync_version | grep type \n \e[0m" 
+
+echo -e "\e[1m\e[32mTo view fullnode logs: \e[0m" 
+echo -e "\e[1m\e[39m    docker logs -f testnet-fullnode-1 --tail 50 \n \e[0m" 
+
+echo -e "\e[1m\e[32mTo view validator node logs: \e[0m" 
+echo -e "\e[1m\e[39m    docker logs -f testnet-validator-1 --tail 50 \n \e[0m" 
+
+echo -e "\e[1m\e[32mTo restart: \e[0m" 
+echo -e "\e[1m\e[39m    docker compose restart \n \e[0m" 
+
+echo -e "\e[1m\e[32mTo view keys: \e[0m" 
+echo -e "\e[1m\e[39m    cat ~/$WORKSPACE/private-keys.yaml \n \e[0m" 
